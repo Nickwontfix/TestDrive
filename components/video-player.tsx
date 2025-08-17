@@ -1,23 +1,7 @@
 "use client"
 
-import { useRef, useEffect, useState } from "react"
-import { Slider } from "@/components/ui/slider"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import {
-  Play,
-  Pause,
-  Volume2,
-  VolumeX,
-  Maximize,
-  SkipBack,
-  SkipForward,
-  RotateCcw,
-  Repeat,
-  Minimize,
-  Volume1,
-  FastForward,
-  Rewind,
-} from "lucide-react"
+import { useRef, useEffect, useState, useCallback } from "react"
+import { SkipBack, SkipForward, Clock, Eye } from "lucide-react"
 
 interface VideoPlayerProps {
   src: string
@@ -26,10 +10,12 @@ interface VideoPlayerProps {
   onNext?: () => void
   onPrevious?: () => void
   embedSrc?: string
+  onProgress?: (currentTime: number, duration: number) => void
 }
 
-export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc }: VideoPlayerProps) {
+export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc, onProgress }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -46,6 +32,179 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
   const [showAdvancedControls, setShowAdvancedControls] = useState(false)
   const [autoplay, setAutoplay] = useState(false)
   const [subtitle, setSubtitle] = useState("off")
+  const [isCompleted, setIsCompleted] = useState(false)
+
+  const [autoProgress, setAutoProgress] = useState(0)
+  const [autoCurrentTime, setAutoCurrentTime] = useState(0)
+  const [estimatedDuration, setEstimatedDuration] = useState(0)
+  const [trackingStartTime, setTrackingStartTime] = useState<number | null>(null)
+  const [isVisible, setIsVisible] = useState(true)
+
+  const estimateVideoDuration = (videoTitle: string): number => {
+    // Look for duration patterns in title
+    const hourMinPattern = /(\d+)h\s*(\d+)m/i
+    const minPattern = /(\d+)min/i
+    const timePattern = /(\d+):(\d+):(\d+)/
+    const shortTimePattern = /(\d+):(\d+)/
+
+    let match = videoTitle.match(hourMinPattern)
+    if (match) {
+      return Number.parseInt(match[1]) * 3600 + Number.parseInt(match[2]) * 60
+    }
+
+    match = videoTitle.match(minPattern)
+    if (match) {
+      return Number.parseInt(match[1]) * 60
+    }
+
+    match = videoTitle.match(timePattern)
+    if (match) {
+      return Number.parseInt(match[1]) * 3600 + Number.parseInt(match[2]) * 60 + Number.parseInt(match[3])
+    }
+
+    match = videoTitle.match(shortTimePattern)
+    if (match) {
+      return Number.parseInt(match[1]) * 60 + Number.parseInt(match[2])
+    }
+
+    const lowerTitle = videoTitle.toLowerCase()
+    const numberMatch = videoTitle.match(/^(\d+)\./)
+    const videoNumber = numberMatch ? Number.parseInt(numberMatch[1]) : 0
+
+    // Realistic duration estimates
+    if (lowerTitle.includes("intro") || lowerTitle.includes("welcome") || lowerTitle.includes("orientation")) {
+      return 600 // 10 minutes for intro videos
+    } else if (lowerTitle.includes("fundamentals") || lowerTitle.includes("basics")) {
+      return 1200 // 20 minutes
+    } else if (lowerTitle.includes("advanced") || lowerTitle.includes("deep")) {
+      return 2400 // 40 minutes
+    } else if (lowerTitle.includes("tutorial") || lowerTitle.includes("lesson")) {
+      return 1800 // 30 minutes
+    } else {
+      // Default based on sequence
+      if (videoNumber <= 5)
+        return 900 // 15 minutes
+      else if (videoNumber <= 20)
+        return 1500 // 25 minutes
+      else return 1800 // 30 minutes
+    }
+  }
+
+  const iframeSrc =
+    embedSrc ||
+    (src.includes("drive.google.com")
+      ? // Using embed URL format to bypass virus scan warning
+        src.replace("/view", "/preview").replace("?usp=sharing", "") + "?embedded=true&autoplay=0"
+      : src)
+
+  useEffect(() => {
+    if (useIframe) {
+      const duration = estimateVideoDuration(title)
+      setEstimatedDuration(duration)
+      setTrackingStartTime(Date.now())
+      setAutoProgress(0)
+      setAutoCurrentTime(0)
+      console.log(
+        "[v0] Starting automatic tracking for:",
+        title,
+        "estimated duration:",
+        Math.round(duration / 60),
+        "minutes",
+      )
+    }
+  }, [useIframe, title])
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      const visible = !document.hidden
+      setIsVisible(visible)
+
+      if (useIframe && trackingStartTime) {
+        if (!visible) {
+          // Pause tracking - save current progress
+          const elapsed = (Date.now() - trackingStartTime) / 1000
+          setAutoCurrentTime((prev) => prev + elapsed)
+          setTrackingStartTime(null)
+          console.log("[v0] Paused tracking - tab hidden")
+        } else if (visible && !trackingStartTime) {
+          // Resume tracking
+          setTrackingStartTime(Date.now())
+          console.log("[v0] Resumed tracking - tab visible")
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange)
+  }, [useIframe, trackingStartTime])
+
+  const updateProgress = useCallback(
+    (currentTime: number, duration: number) => {
+      if (duration > 0 && onProgress) {
+        onProgress(currentTime, duration)
+      }
+    },
+    [onProgress],
+  )
+
+  useEffect(() => {
+    if (!useIframe || !estimatedDuration) return
+
+    const interval = setInterval(() => {
+      if (!document.hidden && !isPlaying) {
+        setAutoProgress((prev) => {
+          const newProgress = prev + 1
+          updateProgress(newProgress, estimatedDuration)
+
+          if (newProgress >= estimatedDuration * 0.9) {
+            setIsCompleted(true)
+          }
+
+          return newProgress
+        })
+      }
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [useIframe, estimatedDuration, isPlaying, updateProgress])
+
+  const handleTimeUpdate = () => {
+    if (videoRef.current && !useIframe) {
+      const currentTime = videoRef.current.currentTime
+      const duration = videoRef.current.duration
+
+      if (duration > 0) {
+        updateProgress(currentTime, duration)
+
+        if (currentTime >= duration * 0.9) {
+          setIsCompleted(true)
+        }
+      }
+    }
+  }
+
+  const [driveProgress, setDriveProgress] = useState(0)
+  const [driveCurrentTime, setDriveCurrentTime] = useState(0)
+  const [driveDuration, setDriveDuration] = useState(0)
+  const [isTrackingDrive, setIsTrackingDrive] = useState(false)
+  const [videoId, setVideoId] = useState<string | null>(null)
+
+  const extractVideoId = (url: string): string | null => {
+    const patterns = [/\/file\/d\/([a-zA-Z0-9_-]+)/, /id=([a-zA-Z0-9_-]+)/, /\/d\/([a-zA-Z0-9_-]+)/]
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern)
+      if (match) return match[1]
+    }
+    return null
+  }
+
+  const createEnhancedIframeSrc = (originalSrc: string): string => {
+    const id = extractVideoId(originalSrc)
+    if (!id) return originalSrc
+
+    return `https://drive.google.com/file/d/${id}/preview?embedded=true&autoplay=0&controls=1`
+  }
 
   useEffect(() => {
     const video = videoRef.current
@@ -57,10 +216,6 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
       setDuration(video.duration)
       setIsLoading(false)
       console.log("[v0] Video loaded successfully")
-    }
-
-    const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime)
     }
 
     const handlePlay = () => setIsPlaying(true)
@@ -84,7 +239,6 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
     }
 
     video.addEventListener("loadedmetadata", handleLoadedMetadata)
-    video.addEventListener("timeupdate", handleTimeUpdate)
     video.addEventListener("play", handlePlay)
     video.addEventListener("pause", handlePause)
     video.addEventListener("error", handleError)
@@ -94,7 +248,6 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
 
     return () => {
       video.removeEventListener("loadedmetadata", handleLoadedMetadata)
-      video.removeEventListener("timeupdate", handleTimeUpdate)
       video.removeEventListener("play", handlePlay)
       video.removeEventListener("pause", handlePause)
       video.removeEventListener("error", handleError)
@@ -102,7 +255,7 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
       video.removeEventListener("canplay", handleCanPlay)
       document.removeEventListener("fullscreenchange", handleFullscreenChange)
     }
-  }, [onError, src, embedSrc])
+  }, [onError, src, embedSrc, onProgress])
 
   useEffect(() => {
     const video = videoRef.current
@@ -112,78 +265,11 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
     setIsPlaying(false)
     setIsLoading(true)
     setUseIframe(false)
+    setAutoProgress(0)
+    setAutoCurrentTime(0)
+    setTrackingStartTime(null)
     video.load()
   }, [src])
-
-  useEffect(() => {
-    const handleKeyPress = (e: KeyboardEvent) => {
-      const video = videoRef.current
-      if (!video) return
-
-      switch (e.code) {
-        case "Space":
-          e.preventDefault()
-          togglePlayPause()
-          break
-        case "ArrowLeft":
-          e.preventDefault()
-          skipBackward()
-          break
-        case "ArrowRight":
-          e.preventDefault()
-          skipForward()
-          break
-        case "ArrowUp":
-          e.preventDefault()
-          setVolume((prev) => Math.min(1, prev + 0.1))
-          break
-        case "ArrowDown":
-          e.preventDefault()
-          setVolume((prev) => Math.max(0, prev - 0.1))
-          break
-        case "KeyF":
-          e.preventDefault()
-          toggleFullscreen()
-          break
-        case "KeyM":
-          e.preventDefault()
-          toggleMute()
-          break
-        case "KeyL":
-          e.preventDefault()
-          toggleLoop()
-          break
-        case "KeyP":
-          e.preventDefault()
-          if (isPiPSupported) togglePictureInPicture()
-          break
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyPress)
-    return () => document.removeEventListener("keydown", handleKeyPress)
-  }, [isPiPSupported])
-
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-
-    video.volume = isMuted ? 0 : volume
-  }, [volume, isMuted])
-
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-
-    video.playbackRate = playbackRate
-  }, [playbackRate])
-
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-
-    video.loop = isLoop
-  }, [isLoop])
 
   const togglePlayPause = () => {
     const video = videoRef.current
@@ -347,52 +433,65 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
     return `${minutes}:${seconds.toString().padStart(2, "0")}`
   }
 
-  if (useIframe && (src.includes("drive.google.com") || embedSrc)) {
-    const iframeSrc =
-      embedSrc ||
-      (src.includes("drive.google.com")
-        ? src.replace(/\/uc\?export=download&id=/, "/file/d/").replace(/&.*$/, "/preview")
-        : src)
+  const markAsWatched = () => {
+    if (onProgress) {
+      console.log("[v0] Manually marking video as watched")
+      onProgress(3600, 3600) // Simulate full duration watched
+    }
+  }
 
+  const markProgress = (percentage: number) => {
+    if (onProgress) {
+      const simulatedDuration = 3600 // 1 hour default
+      const currentTime = (percentage / 100) * simulatedDuration
+      console.log("[v0] Manually setting progress to", percentage + "%")
+      onProgress(currentTime, simulatedDuration)
+    }
+  }
+
+  if (useIframe && (src.includes("drive.google.com") || embedSrc)) {
     return (
       <div className="relative bg-black rounded-lg overflow-hidden">
         <iframe
-          src={iframeSrc}
+          ref={iframeRef}
+          src={createEnhancedIframeSrc(src)} // Using enhanced iframe source to bypass virus scan
           className="w-full aspect-video"
           allow="autoplay; encrypted-media"
           allowFullScreen
           title={title}
         />
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4">
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent p-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               {onPrevious && (
                 <button
-                  onClick={handlePrevious}
-                  className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
+                  onClick={onPrevious}
+                  className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-black/30 hover:bg-black/50 border-none cursor-pointer"
                   type="button"
                 >
                   <SkipBack className="h-4 w-4" />
                 </button>
               )}
-              <button
-                onClick={togglePlayPause}
-                className="text-white hover:text-blue-400 p-3 rounded-full bg-white/20 hover:bg-white/30 transition-colors border-none cursor-pointer"
-                type="button"
-              >
-                <Play className="h-5 w-5" />
-              </button>
               {onNext && (
                 <button
-                  onClick={handleNext}
-                  className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
+                  onClick={onNext}
+                  className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-black/30 hover:bg-black/50 border-none cursor-pointer"
                   type="button"
                 >
-                  <SkipForward className="h-5 w-5" />
+                  <SkipForward className="h-4 w-4" />
                 </button>
               )}
             </div>
-            <span className="text-white text-sm truncate max-w-xs" title={title}>
+            <div className="flex items-center gap-2 text-white text-xs">
+              <Eye className="h-3 w-3" />
+              <span>Progress: {Math.round(autoProgress)}%</span>
+              <Clock className="h-3 w-3" />
+              <span>
+                {formatTime(autoCurrentTime + (trackingStartTime ? (Date.now() - trackingStartTime) / 1000 : 0))}
+              </span>
+              <span>/ {formatTime(estimatedDuration)}</span>
+            </div>
+            <span className="text-white text-sm truncate max-w-xs bg-black/50 px-2 py-1 rounded" title={title}>
               {title}
             </span>
           </div>
@@ -411,6 +510,7 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
         preload="metadata"
         playsInline
         autoPlay={autoplay}
+        onTimeUpdate={handleTimeUpdate}
       />
 
       {isLoading && (
@@ -421,151 +521,41 @@ export function VideoPlayer({ src, title, onError, onNext, onPrevious, embedSrc 
 
       <div
         className="absolute inset-0 cursor-pointer z-0"
-        onClick={togglePlayPause}
-        style={{ bottom: "120px" }} // Don't overlap with controls
+        onClick={() => {
+          const video = videoRef.current
+          if (!video) return
+          if (video.paused) {
+            video.play()
+          } else {
+            video.pause()
+          }
+        }}
       />
 
-      <div className="absolute bottom-0 left-0 right-0 bg-black/90 p-4 z-20 pointer-events-auto">
-        <div className="mb-4">
-          <Slider
-            value={[currentTime]}
-            max={duration || 100}
-            step={1}
-            onValueChange={handleSeek}
-            className="w-full cursor-pointer"
-          />
-          <div className="flex justify-between text-xs text-white/80 mt-1">
-            <span>{formatTime(currentTime)}</span>
-            <span>{formatTime(duration)}</span>
-          </div>
+      <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity z-20">
+        <div className="flex items-center gap-2">
+          {onPrevious && (
+            <button
+              onClick={onPrevious}
+              className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-black/50 hover:bg-black/70 border-none cursor-pointer"
+              type="button"
+            >
+              <SkipBack className="h-4 w-4" />
+            </button>
+          )}
+          {onNext && (
+            <button
+              onClick={onNext}
+              className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-black/50 hover:bg-black/70 border-none cursor-pointer"
+              type="button"
+            >
+              <SkipForward className="h-4 w-4" />
+            </button>
+          )}
         </div>
-
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {onPrevious && (
-              <button
-                onClick={handlePrevious}
-                className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-                type="button"
-              >
-                <SkipBack className="h-5 w-5" />
-              </button>
-            )}
-
-            <button
-              onClick={skipBackward}
-              className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-              type="button"
-            >
-              <Rewind className="h-4 w-4" />
-            </button>
-
-            <button
-              onClick={togglePlayPause}
-              className="text-white hover:text-blue-400 p-3 rounded-full bg-white/20 hover:bg-white/30 transition-colors border-none cursor-pointer"
-              type="button"
-            >
-              {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
-            </button>
-
-            <button
-              onClick={skipForward}
-              className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-              type="button"
-            >
-              <FastForward className="h-4 w-4" />
-            </button>
-
-            {onNext && (
-              <button
-                onClick={handleNext}
-                className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-                type="button"
-              >
-                <SkipForward className="h-5 w-5" />
-              </button>
-            )}
-
-            <div className="flex items-center gap-2 ml-4">
-              <button
-                onClick={toggleMute}
-                className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-                type="button"
-              >
-                {isMuted ? (
-                  <VolumeX className="h-4 w-4" />
-                ) : volume > 0.5 ? (
-                  <Volume2 className="h-4 w-4" />
-                ) : (
-                  <Volume1 className="h-4 w-4" />
-                )}
-              </button>
-              <div className="w-20">
-                <Slider
-                  value={[isMuted ? 0 : volume]}
-                  max={1}
-                  step={0.1}
-                  onValueChange={handleVolumeChange}
-                  className="w-full cursor-pointer"
-                />
-              </div>
-              <span className="text-white/60 text-xs w-8">{Math.round((isMuted ? 0 : volume) * 100)}</span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Select value={playbackRate.toString()} onValueChange={handlePlaybackRateChange}>
-              <SelectTrigger className="w-16 h-8 text-white border-white/20 bg-black/50 hover:bg-black/70 transition-colors">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="0.25">0.25x</SelectItem>
-                <SelectItem value="0.5">0.5x</SelectItem>
-                <SelectItem value="0.75">0.75x</SelectItem>
-                <SelectItem value="1">1x</SelectItem>
-                <SelectItem value="1.25">1.25x</SelectItem>
-                <SelectItem value="1.5">1.5x</SelectItem>
-                <SelectItem value="2">2x</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <button
-              onClick={toggleFullscreen}
-              className="text-white hover:text-blue-400 p-2 rounded transition-colors bg-transparent border-none cursor-pointer"
-              type="button"
-            >
-              {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between text-xs mt-2">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={restart}
-              className="text-white/60 hover:text-white p-1 rounded transition-colors bg-transparent border-none cursor-pointer flex items-center gap-1"
-              type="button"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Restart
-            </button>
-
-            <button
-              onClick={toggleLoop}
-              className={`text-white/60 hover:text-white p-1 rounded transition-colors bg-transparent border-none cursor-pointer flex items-center gap-1 ${isLoop ? "text-blue-400" : ""}`}
-              type="button"
-            >
-              <Repeat className="h-3 w-3" />
-              Loop
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-white/60 truncate max-w-xs" title={title}>
-              {title}
-            </span>
-          </div>
-        </div>
+        <span className="text-white text-sm bg-black/50 px-2 py-1 rounded max-w-xs truncate" title={title}>
+          {title}
+        </span>
       </div>
     </div>
   )
